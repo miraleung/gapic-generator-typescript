@@ -32,6 +32,28 @@ import * as gapicConfig from './big_query_storage_client_config.json';
 const version = require('../../../package.json').version;
 
 /**
+ * Detect mTLS client certificate based on logic described in
+ * https://google.aip.dev/auth/4114.
+ *
+ * @param {object} [options] - The configuration object.
+ * @returns {Array} Array of strings representing client cert and key.
+ */
+function detectClientCertificate (opts?: ClientOptions) {
+  // If GOOGLE_API_USE_CLIENT_CERTIFICATE is true...:
+  if (process?.env?.GOOGLE_API_USE_CLIENT_CERTIFICATE === 'true') {
+    if (opts?.cert && opts?.key) {
+      return [opts.cert, opts.key];
+    }
+    // TODO: If client_cert_source is provided, use this cert/key.
+    // TODO: If context aware metadata exists, run the cert provider command,
+    // parse the output to extract cert and key, and use this cert/key.
+  }
+  // If GOOGLE_API_USE_CLIENT_CERTIFICATE is not set or false,
+  // use no cert or key:
+  return [undefined, undefined];
+}
+
+/**
  *  BigQuery storage API.
  *
  *  The BigQuery storage API can be used to read data stored in BigQuery.
@@ -93,14 +115,16 @@ export class BigQueryStorageClient {
   constructor(opts?: ClientOptions) {
     // Ensure that options include all the required fields.
     const staticMembers = this.constructor as typeof BigQueryStorageClient;
-    const servicePath = opts?.servicePath || opts?.apiEndpoint || staticMembers.servicePath;
+    // See: https://google.aip.dev/auth/4114
+    const [cert, key] = detectClientCertificate(opts);
+    const servicePath = opts?.servicePath || opts?.apiEndpoint || this.mtlsServicePath(cert, key);
     const port = opts?.port || staticMembers.port;
     const clientConfig = opts?.clientConfig ?? {};
     const fallback = opts?.fallback ?? (typeof window !== 'undefined' && typeof window?.fetch === 'function');
-    opts = Object.assign({servicePath, port, clientConfig, fallback}, opts);
+    opts = Object.assign({servicePath, port, clientConfig, fallback, cert, key}, opts);
 
     // If scopes are unset in options and we're connecting to a non-default endpoint, set scopes just in case.
-    if (servicePath !== staticMembers.servicePath && !('scopes' in opts)) {
+    if (servicePath !== this.mtlsServicePath(cert, key) && !('scopes' in opts)) {
       opts['scopes'] = staticMembers.scopes;
     }
 
@@ -117,7 +141,7 @@ export class BigQueryStorageClient {
     this.auth = (this._gaxGrpc.auth as gax.GoogleAuth);
 
     // Set the default scopes in auth client if needed.
-    if (servicePath === staticMembers.servicePath) {
+    if (servicePath === this.mtlsServicePath(cert, key)) {
       this.auth.defaultScopes = staticMembers.scopes;
     }
 
@@ -227,6 +251,22 @@ export class BigQueryStorageClient {
     }
 
     return this.bigQueryStorageStub;
+  }
+
+  /**
+   * Return service path, taking into account mTLS logic.
+   * @returns {string} The DNS address for this service.
+   */
+  mtlsServicePath(cert?: string, key?: string) {
+    const staticMembers = this.constructor as typeof BigQueryStorageClient;
+    const servicePath = staticMembers.servicePath;
+    if (process?.env?.GOOGLE_API_USE_MTLS_ENDPOINT === 'never') {
+      return servicePath;
+    } else if (process?.env?.GOOGLE_API_USE_MTLS_ENDPOINT === 'always' ||
+               (cert && key)) {
+      return servicePath.replace('googleapis.com', 'mtls.googleapis.com')
+    }
+    return servicePath;
   }
 
   /**
